@@ -1,31 +1,18 @@
-"""
-Session Runner - Core orchestration logic.
-
-Manages the solution loop lifecycle:
-1. Initialize session state
-2. Run cycles (problem -> research -> candidates -> critique -> judge)
-3. Track progress and artifacts
-4. Produce final synthesis
-"""
+from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any
 
 from agents.architect import Architect, ArchitectInput
 from agents.critic import Critic, CriticInput
 from agents.judge import Judge, JudgeInput
 from agents.problem_framer import ProblemFramer, ProblemFramerInput
 from agents.researcher import Researcher, ResearcherInput
-from config import settings
 from schemas.models import (
     CandidateSolution,
     ConvergenceStatus,
-    CritiqueReport,
     CycleResult,
     NextAction,
-    ProblemDefinition,
-    ResearchFindings,
     SessionInput,
     SessionOutput,
     SessionState,
@@ -33,25 +20,15 @@ from schemas.models import (
 
 
 class SessionRunner:
-    """
-    Orchestrates the multi-agent solution cycle.
-
-    Design principles:
-    - Explicit state management
-    - Clear phase transitions
-    - Artifact preservation
-    - Graceful degradation
-    """
-
     def __init__(
         self,
+        *,
         framer: ProblemFramer | None = None,
         researcher: Researcher | None = None,
         architect: Architect | None = None,
         critic: Critic | None = None,
-        judge: Judge | None = None
-    ):
-        """Initialize with injectable agents for testability."""
+        judge: Judge | None = None,
+    ) -> None:
         self.framer = framer or ProblemFramer()
         self.researcher = researcher or Researcher()
         self.architect = architect or Architect()
@@ -59,508 +36,150 @@ class SessionRunner:
         self.judge = judge or Judge()
 
     async def run(self, input_data: SessionInput) -> SessionOutput:
-        """
-        Run a complete solution session.
+        state = SessionState(session_id=str(uuid.uuid4())[:8], input_data=input_data)
 
-        Args:
-            input_data: Session parameters including problem description
-
-        Returns:
-            SessionOutput with final synthesis and all artifacts
-        """
-        # Initialize session
-        session_id = str(uuid.uuid4())[:8]
-        state = SessionState(
-            session_id=session_id,
-            input_data=input_data
-        )
-
-        # Run cycles until complete
         while not state.is_complete(input_data.max_cycles):
-            cycle_result = await self._run_cycle(state)
-            state.cycles.append(cycle_result)
+            cycle = await self._run_cycle(state)
+            state.cycles.append(cycle)
             state.updated_at = datetime.now(timezone.utc)
 
-        # Generate final output
         return self._synthesize_output(state)
 
     async def _run_cycle(self, state: SessionState) -> CycleResult:
-        """
-        Execute a single cycle of the solution loop.
+        cycle_number = len(state.cycles) + 1
 
-        Phase determination:
-        - Cycle 1: Always frame problem
-        - Cycle 2+: Based on judge's recommendation
-        """
-        cycle_num = state.current_cycle
-        input_data = state.input_data
-
-        # Phase 1: Problem Framing (always cycle 1)
-        if cycle_num == 1:
-            return await self._execute_problem_framing(state)
-
-        # Determine what to do based on current state
-        judge_input = self._build_judge_input(state)
-        judge_result = await self.judge.execute(judge_input)
-
-        if not judge_result.success or not judge_result.data:
-            # Judge failure - attempt graceful recovery
-            return self._handle_judge_failure(cycle_num)
-
-        next_action = judge_result.data.next_action
-
-        # Execute based on judge recommendation
-        if next_action == NextAction.RESEARCH:
-            return await self._execute_research(state)
-
-        if next_action == NextAction.GENERATE_CANDIDATES:
-            return await self._execute_candidate_generation(state)
-
-        if next_action == NextAction.CRITIQUE:
-            return await self._execute_critique(state)
-
-        if next_action == NextAction.REFINE_PROBLEM:
-            return await self._execute_problem_refinement(state)
-
-        # Default: Converge
-        return await self._execute_convergence(state, judge_result.data.convergence)
-
-    async def _execute_problem_framing(self, state: SessionState) -> CycleResult:
-        """Execute the problem framing phase."""
-        framer_input = ProblemFramerInput(
-            raw_description=state.input_data.problem_description,
-            context=state.input_data.context
-        )
-
-        result = await self.framer.execute(framer_input)
-
-        if result.success and result.data:
-            state.current_problem = result.data
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                problem=result.data,
-                next_action=NextAction.GENERATE_CANDIDATES,
-                next_action_reasoning="Problem framed, ready to generate solutions"
-            )
-
-        # Framing failure
-        return CycleResult(
-            cycle_number=state.current_cycle,
-            next_action=NextAction.NEEDS_HUMAN_INPUT,
-            next_action_reasoning=f"Problem framing failed: {result.error}"
-        )
-
-    async def _execute_research(self, state: SessionState) -> CycleResult:
-        """Execute the research phase."""
-        if not state.current_problem:
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                next_action=NextAction.REFINE_PROBLEM,
-                next_action_reasoning="Cannot research without defined problem"
-            )
-
-        research_input = ResearcherInput(
-            query=state.current_problem.root_problem,
-            problem_context=state.current_problem.raw_input,
-            existing_evidence=[]
-        )
-
-        result = await self.researcher.execute(research_input)
-
-        if result.success and result.data:
-            state.research_done = True
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                problem=state.current_problem,
-                research=result.data,
-                next_action=NextAction.GENERATE_CANDIDATES,
-                next_action_reasoning="Research complete, ready for candidates"
-            )
-
-        return CycleResult(
-            cycle_number=state.current_cycle,
-            problem=state.current_problem,
-            next_action=NextAction.GENERATE_CANDIDATES,
-            next_action_reasoning="Research failed, proceeding with candidates anyway"
-        )
-
-    async def _execute_candidate_generation(
-        self,
-        state: SessionState
-    ) -> CycleResult:
-        """Execute the candidate generation phase."""
-        if not state.current_problem:
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                next_action=NextAction.REFINE_PROBLEM,
-                next_action_reasoning="Cannot generate candidates without problem"
-            )
-
-        # Get research from previous cycle if available
-        research = None
-        if state.cycles:
-            for cycle in reversed(state.cycles):
-                if cycle.research:
-                    research = cycle.research
-                    break
-
-        architect_input = ArchitectInput(
-            problem=state.current_problem,
-            research=research,
-            existing_candidates=[],
-            min_candidates=3
-        )
-
-        result = await self.architect.execute(architect_input)
-
-        if result.success and result.data:
-            state.candidates_generated = len(result.data)
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                problem=state.current_problem,
-                research=research,
-                candidates=result.data,
-                next_action=NextAction.CRITIQUE,
-                next_action_reasoning=f"Generated {len(result.data)} candidates, ready for critique"
-            )
-
-        return CycleResult(
-            cycle_number=state.current_cycle,
-            problem=state.current_problem,
-            next_action=NextAction.NEEDS_HUMAN_INPUT,
-            next_action_reasoning=f"Candidate generation failed: {result.error}"
-        )
-
-    async def _execute_critique(self, state: SessionState) -> CycleResult:
-        """Execute the critique phase."""
-        if not state.current_problem:
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                next_action=NextAction.REFINE_PROBLEM,
-                next_action_reasoning="Cannot critique without problem"
-            )
-
-        # Get candidates from previous cycle
-        candidates: list[CandidateSolution] = []
-        research: ResearchFindings | None = None
-
-        for cycle in reversed(state.cycles):
-            if cycle.candidates and not candidates:
-                candidates = cycle.candidates
-            if cycle.research and not research:
-                research = cycle.research
-            if candidates:
-                break
-
-        if not candidates:
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                problem=state.current_problem,
-                next_action=NextAction.GENERATE_CANDIDATES,
-                next_action_reasoning="No candidates found to critique"
-            )
-
-        critic_input = CriticInput(
-            problem=state.current_problem,
-            candidates=candidates
-        )
-
-        result = await self.critic.execute(critic_input)
-
-        if result.success and result.data:
-            state.critiques_done = len(result.data)
-
-            # Judge what to do next
-            judge_input = JudgeInput(
-                problem=state.current_problem,
-                cycle_number=state.current_cycle,
-                max_cycles=state.input_data.max_cycles,
-                research=research,
-                candidates=candidates,
-                critiques=result.data
-            )
-            judge_result = await self.judge.execute(judge_input)
-
-            next_action = NextAction.CONVERGE
-            reasoning = "Critique complete, evaluating convergence"
-
-            if judge_result.success and judge_result.data:
-                next_action = judge_result.data.next_action
-                reasoning = judge_result.data.next_action_reasoning
-
-            return CycleResult(
-                cycle_number=state.current_cycle,
-                problem=state.current_problem,
-                research=research,
-                candidates=candidates,
-                critiques=result.data,
-                next_action=next_action,
-                next_action_reasoning=reasoning
-            )
-
-        return CycleResult(
-            cycle_number=state.current_cycle,
-            problem=state.current_problem,
-            candidates=candidates,
-            next_action=NextAction.CONVERGE,
-            next_action_reasoning=f"Critique failed: {result.error}, attempting convergence"
-        )
-
-    async def _execute_problem_refinement(
-        self,
-        state: SessionState
-    ) -> CycleResult:
-        """Execute problem refinement when blockers found."""
-        # For MVP: just re-frame with current state context
-        if state.current_problem:
-            refined_context = {
-                **state.input_data.context,
-                "refinement_cycle": state.current_cycle,
-                "previous_root": state.current_problem.root_problem
-            }
-
-            framer_input = ProblemFramerInput(
-                raw_description=state.input_data.problem_description,
-                context=refined_context
-            )
-
-            result = await self.framer.execute(framer_input)
-
-            if result.success and result.data:
-                state.current_problem = result.data
-                return CycleResult(
-                    cycle_number=state.current_cycle,
-                    problem=result.data,
-                    next_action=NextAction.GENERATE_CANDIDATES,
-                    next_action_reasoning="Problem refined based on new insights"
+        if state.problem is None:
+            framed = await self.framer.execute(
+                ProblemFramerInput(
+                    raw_description=state.input_data.problem_description,
+                    context=state.input_data.context,
                 )
+            )
+            if not framed.success or framed.data is None:
+                raise RuntimeError(framed.error or 'Problem framing failed.')
+            state.problem = framed.data
+            return CycleResult(
+                cycle_number=cycle_number,
+                action_taken=NextAction.design,
+                notes='Framed the raw problem into a structured working definition.',
+                problem=state.problem,
+                convergence=ConvergenceStatus(converged=False, confidence=0.25, reason='Problem framed; research/design still needed.'),
+            )
 
+        if state.research is None and state.input_data.allow_external_research:
+            research = await self.researcher.execute(
+                ResearcherInput(
+                    query=state.problem.root_problem,
+                    problem_context=state.problem.raw_input,
+                )
+            )
+            if not research.success or research.data is None:
+                raise RuntimeError(research.error or 'Research failed.')
+            state.research = research.data
+            return CycleResult(
+                cycle_number=cycle_number,
+                action_taken=NextAction.research,
+                notes='Collected evidence and identified follow-up gaps.',
+                problem=state.problem,
+                research=state.research,
+                convergence=ConvergenceStatus(converged=False, confidence=0.35, reason='Evidence collected; candidates still need comparison.'),
+            )
+
+        if len(state.candidates) < 3:
+            built = await self.architect.execute(
+                ArchitectInput(
+                    problem=state.problem,
+                    research=state.research,
+                    existing_candidates=state.candidates,
+                )
+            )
+            if not built.success or built.data is None:
+                raise RuntimeError(built.error or 'Candidate generation failed.')
+            state.candidates = built.data
+            return CycleResult(
+                cycle_number=cycle_number,
+                action_taken=NextAction.design,
+                notes='Generated competing solution candidates.',
+                problem=state.problem,
+                research=state.research,
+                candidates=state.candidates,
+                convergence=ConvergenceStatus(converged=False, confidence=0.45, reason='Candidates exist but still need critique.'),
+            )
+
+        if len(state.critiques) < len(state.candidates):
+            critiqued = await self.critic.execute(CriticInput(problem=state.problem, candidates=state.candidates))
+            if not critiqued.success or critiqued.data is None:
+                raise RuntimeError(critiqued.error or 'Critique failed.')
+            state.critiques = critiqued.data
+            return CycleResult(
+                cycle_number=cycle_number,
+                action_taken=NextAction.critique,
+                notes='Attacked candidate weaknesses and surfaced uncertainties.',
+                problem=state.problem,
+                research=state.research,
+                candidates=state.candidates,
+                critiques=state.critiques,
+                convergence=ConvergenceStatus(converged=False, confidence=0.56, reason='Critiques complete; ready for final judgment.'),
+            )
+
+        judged = await self.judge.execute(
+            JudgeInput(
+                problem=state.problem,
+                cycle_number=cycle_number,
+                max_cycles=state.input_data.max_cycles,
+                research=state.research,
+                candidates=state.candidates,
+                critiques=state.critiques,
+                previous_actions=[cycle.action_taken for cycle in state.cycles],
+            )
+        )
+        if not judged.success or judged.data is None:
+            raise RuntimeError(judged.error or 'Judgment failed.')
+
+        state.final_synthesis = self._build_synthesis(state)
         return CycleResult(
-            cycle_number=state.current_cycle,
-            next_action=NextAction.NEEDS_HUMAN_INPUT,
-            next_action_reasoning="Problem refinement required but failed"
+            cycle_number=cycle_number,
+            action_taken=judged.data.next_action,
+            notes=judged.data.next_action_reasoning,
+            problem=state.problem,
+            research=state.research,
+            candidates=state.candidates,
+            critiques=state.critiques,
+            convergence=judged.data.convergence,
         )
 
-    async def _execute_convergence(
-        self,
-        state: SessionState,
-        convergence: ConvergenceStatus
-    ) -> CycleResult:
-        """Execute convergence phase."""
-        # Gather all artifacts
-        candidates: list[CandidateSolution] = []
-        critiques: list[CritiqueReport] = []
-        research: ResearchFindings | None = None
-
-        for cycle in reversed(state.cycles):
-            if cycle.candidates and not candidates:
-                candidates = cycle.candidates
-            if cycle.critiques and not critiques:
-                critiques = cycle.critiques
-            if cycle.research and not research:
-                research = cycle.research
-
-        return CycleResult(
-            cycle_number=state.current_cycle,
-            problem=state.current_problem,
-            research=research,
-            candidates=candidates,
-            critiques=critiques,
-            next_action=NextAction.CONVERGE,
-            next_action_reasoning=f"Convergence: {convergence.reason}"
+    def _build_synthesis(self, state: SessionState) -> str:
+        ranked = sorted(
+            state.candidates,
+            key=lambda candidate: next((c.score for c in state.critiques if c.candidate_id == candidate.id), 0.0),
+            reverse=True,
         )
-
-    def _handle_judge_failure(self, cycle_num: int) -> CycleResult:
-        """Handle judge agent failure gracefully."""
-        return CycleResult(
-            cycle_number=cycle_num,
-            next_action=NextAction.NEEDS_HUMAN_INPUT,
-            next_action_reasoning="Judge evaluation failed - manual intervention needed"
-        )
-
-    def _build_judge_input(self, state: SessionState) -> JudgeInput:
-        """Build judge input from current state."""
-        candidates: list[CandidateSolution] = []
-        critiques: list[CritiqueReport] = []
-        research: ResearchFindings | None = None
-        previous_actions: list[NextAction] = []
-
-        for cycle in state.cycles:
-            previous_actions.append(cycle.next_action)
-            if cycle.candidates:
-                candidates = cycle.candidates
-            if cycle.critiques:
-                critiques = cycle.critiques
-            if cycle.research:
-                research = cycle.research
-
-        return JudgeInput(
-            problem=state.current_problem,
-            cycle_number=state.current_cycle,
-            max_cycles=state.input_data.max_cycles,
-            research=research,
-            candidates=candidates,
-            critiques=critiques,
-            previous_actions=previous_actions
-        )
+        top = ranked[0] if ranked else None
+        summary = [
+            f"Problem: {state.problem.root_problem}",
+            f"Constraints: {', '.join(state.problem.constraints) if state.problem.constraints else 'None explicitly stated'}",
+            f"Top candidate: {top.name if top else 'None'}",
+            f"Why it leads: {top.description if top else 'No candidates generated'}",
+            'Next step: run a small measured experiment before large rollout.',
+        ]
+        return '\n'.join(summary)
 
     def _synthesize_output(self, state: SessionState) -> SessionOutput:
-        """Generate final session output from state."""
-        if not state.cycles:
-            raise ValueError("No cycles completed")
-
-        # Get final artifacts
+        ranked = sorted(
+            state.candidates,
+            key=lambda candidate: next((c.score for c in state.critiques if c.candidate_id == candidate.id), candidate.confidence),
+            reverse=True,
+        )
         final_cycle = state.cycles[-1]
-        problem = state.current_problem
-        research: ResearchFindings | None = None
-        all_candidates: list[CandidateSolution] = []
-        all_critiques: list[CritiqueReport] = []
-
-        for cycle in state.cycles:
-            if cycle.research:
-                research = cycle.research
-            if cycle.candidates:
-                all_candidates = cycle.candidates
-            if cycle.critiques:
-                all_critiques = cycle.critiques
-
-        # Determine top candidate
-        top_candidate = self._select_top_candidate(all_candidates, all_critiques)
-
-        # Build critique summary
-        critique_summary: dict[str, list[str]] = {}
-        for critique in all_critiques:
-            critique_summary[critique.candidate_id] = critique.weaknesses
-
-        # Assess convergence
-        convergence = self._final_convergence_assessment(
-            state, problem, all_candidates
-        )
-
-        # Generate synthesis
-        synthesis = self._generate_synthesis(
-            problem, all_candidates, top_candidate, convergence
-        )
-
         return SessionOutput(
             session_id=state.session_id,
-            problem=problem,
-            research_findings=research,
-            candidates=all_candidates,
-            top_candidate=top_candidate,
-            critique_summary=critique_summary,
-            convergence=convergence,
-            final_synthesis=synthesis,
+            problem=state.problem,
+            research=state.research,
+            candidates=ranked,
+            critiques=state.critiques,
+            top_candidate=ranked[0] if ranked else None,
+            convergence=final_cycle.convergence or ConvergenceStatus(converged=False, confidence=0.0, reason='No convergence produced.'),
+            final_synthesis=state.final_synthesis or self._build_synthesis(state),
             cycles_completed=len(state.cycles),
-            artifacts_generated=[
-                f"problem_definition_{state.session_id}",
-                f"candidates_{len(all_candidates)}",
-                f"critiques_{len(all_critiques)}"
-            ]
+            cycles=state.cycles,
         )
-
-    def _select_top_candidate(
-        self,
-        candidates: list[CandidateSolution],
-        critiques: list[CritiqueReport]
-    ) -> CandidateSolution | None:
-        """Select the best candidate based on scores and critiques."""
-        if not candidates:
-            return None
-
-        # Build dealbreaker map
-        dealbreakers: dict[str, int] = {}
-        for critique in critiques:
-            dealbreakers[critique.candidate_id] = len(critique.dealbreakers)
-
-        # Score candidates
-        scored: list[tuple[CandidateSolution, float]] = []
-        for candidate in candidates:
-            score = candidate.score or 0.5
-            # Penalize dealbreakers
-            score -= dealbreakers.get(candidate.id, 0) * 0.2
-            scored.append((candidate, score))
-
-        # Sort by score descending
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[0][0] if scored else None
-
-    def _final_convergence_assessment(
-        self,
-        state: SessionState,
-        problem: ProblemDefinition | None,
-        candidates: list[CandidateSolution]
-    ) -> ConvergenceStatus:
-        """Final convergence assessment for output."""
-        criteria_met: dict[str, bool] = {
-            "root_problem_defined": bool(problem and problem.root_problem),
-            "sufficient_candidates": len(candidates) >= settings.min_candidates_for_convergence,
-            "uncertainties_reduced": True,  # Simplified for MVP
-            "risks_surfaced": len(candidates) > 0 and all(c.key_risks for c in candidates),
-            "implementation_concrete": len(candidates) > 0 and all(
-                len(c.implementation_steps) >= 3 for c in candidates
-            )
-        }
-
-        converged = all(criteria_met.values())
-        confidence = sum(criteria_met.values()) / len(criteria_met)
-
-        return ConvergenceStatus(
-            converged=converged,
-            confidence=confidence,
-            reason="Final assessment based on completed cycles",
-            criteria_met=criteria_met
-        )
-
-    def _generate_synthesis(
-        self,
-        problem: ProblemDefinition | None,
-        candidates: list[CandidateSolution],
-        top_candidate: CandidateSolution | None,
-        convergence: ConvergenceStatus
-    ) -> str:
-        """Generate executive summary synthesis."""
-        if not problem:
-            return "No problem definition available."
-
-        lines = [
-            "# Solution Lab Synthesis",
-            "",
-            f"## Problem",
-            problem.root_problem,
-            "",
-            f"## Success Criteria",
-        ]
-
-        for criterion in problem.success_criteria:
-            lines.append(f"- {criterion}")
-
-        lines.extend([
-            "",
-            f"## Candidates Evaluated: {len(candidates)}",
-        ])
-
-        for c in candidates:
-            score_str = f" ({c.score:.0%})" if c.score else ""
-            lines.append(f"- **{c.name}**{score_str}: {c.description[:100]}...")
-
-        if top_candidate:
-            lines.extend([
-                "",
-                "## Recommended Approach",
-                f"**{top_candidate.name}**",
-                "",
-                "### Implementation Steps",
-            ])
-            for step in top_candidate.implementation_steps:
-                lines.append(f"1. {step}")
-
-        lines.extend([
-            "",
-            f"## Convergence Status",
-            f"- **Converged**: {'Yes' if convergence.converged else 'No'}",
-            f"- **Confidence**: {convergence.confidence:.0%}",
-            f"- **Reason**: {convergence.reason}",
-        ])
-
-        return "\n".join(lines)

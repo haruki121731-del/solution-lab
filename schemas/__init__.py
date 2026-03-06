@@ -1,5 +1,3 @@
-"""Pydantic schemas for structured data throughout the system."""
-
 from schemas.models import (
     Assumption,
     CandidateSolution,
@@ -12,6 +10,7 @@ from schemas.models import (
     ProblemDefinition,
     ResearchFindings,
     Risk,
+    RiskSeverity,
     SessionInput,
     SessionOutput,
     SessionState,
@@ -19,19 +18,20 @@ from schemas.models import (
 )
 
 __all__ = [
-    "Assumption",
-    "CandidateSolution",
-    "ConvergenceStatus",
-    "CritiqueReport",
-    "CycleResult",
-    "Evidence",
-    "EvidenceType",
-    "NextAction",
-    "ProblemDefinition",
-    "ResearchFindings",
-    "Risk",
-    "SessionInput",
-    "SessionOutput",
-    "SessionState",
-    "Uncertainty",
+    'Assumption',
+    'CandidateSolution',
+    'ConvergenceStatus',
+    'CritiqueReport',
+    'CycleResult',
+    'Evidence',
+    'EvidenceType',
+    'NextAction',
+    'ProblemDefinition',
+    'ResearchFindings',
+    'Risk',
+    'RiskSeverity',
+    'SessionInput',
+    'SessionOutput',
+    'SessionState',
+    'Uncertainty',
 ]

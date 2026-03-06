@@ -1,5 +1,3 @@
-"""External tool integrations."""
+from tools.research import HeuristicResearchClient, ResearchClient
 
-from tools.firecrawl_client import FirecrawlClient
-
-__all__ = ["FirecrawlClient"]
+__all__ = ['HeuristicResearchClient', 'ResearchClient']

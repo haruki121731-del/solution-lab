@@ -1,9 +1,20 @@
-"""Agent modules for structured problem-solving."""
+from agents.architect import Architect, ArchitectInput
+from agents.base import AgentResult
+from agents.critic import Critic, CriticInput
+from agents.judge import Judge, JudgeInput
+from agents.problem_framer import ProblemFramer, ProblemFramerInput
+from agents.researcher import Researcher, ResearcherInput
 
-from agents.problem_framer import ProblemFramer
-from agents.researcher import Researcher
-from agents.architect import Architect
-from agents.critic import Critic
-from agents.judge import Judge
-
-__all__ = ["ProblemFramer", "Researcher", "Architect", "Critic", "Judge"]
+__all__ = [
+    'AgentResult',
+    'Architect',
+    'ArchitectInput',
+    'Critic',
+    'CriticInput',
+    'Judge',
+    'JudgeInput',
+    'ProblemFramer',
+    'ProblemFramerInput',
+    'Researcher',
+    'ResearcherInput',
+]
