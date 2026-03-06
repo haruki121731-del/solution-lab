@@ -39,3 +39,20 @@ async def test_runner_works_without_research() -> None:
     assert result.problem is not None
     assert len(result.candidates) >= 3
     assert result.cycles_completed >= 4
+
+
+@pytest.mark.asyncio
+async def test_runner_with_api_keywords() -> None:
+    """Test that API-related keywords trigger specific candidate."""
+    runner = SessionRunner()
+    result = await runner.run(
+        SessionInput(
+            problem_description='Our API latency is too high during peak hours.',
+            max_cycles=5,
+            allow_external_research=True,
+        )
+    )
+
+    # Should have API-specific candidate
+    candidate_names = [c.name for c in result.candidates]
+    assert any('Profile' in name or 'hot path' in name.lower() for name in candidate_names)

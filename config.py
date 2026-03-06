@@ -26,11 +26,17 @@ class Settings(BaseSettings):
     max_candidates_per_cycle: int = 5
     allow_external_research_default: bool = True
 
+    # External API keys
     firecrawl_api_key: str | None = None
     firecrawl_base_url: str = 'https://api.firecrawl.dev'
-    research_timeout_seconds: int = 20
+    openai_api_key: str | None = None
+    anthropic_api_key: str | None = None
 
-    session_storage_path: Path = Field(default=Path('./sessions'))
+    # Auth
+    api_keys: str = ''  # Comma-separated list
+
+    # Storage
+    session_storage_path: Path = Field(default=Path('./data/sessions.db'))
 
 
 @lru_cache(maxsize=1)
